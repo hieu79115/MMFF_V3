@@ -20,8 +20,17 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
 
     p.add_argument("--data_dir", type=str, default="data")
+    p.add_argument("--train_data", type=str, default="")
+    p.add_argument("--train_label", type=str, default="")
+    p.add_argument("--val_data", type=str, default="")
+    p.add_argument("--val_label", type=str, default="")
+    p.add_argument("--images_dir", type=str, default="")
     p.add_argument("--dataset", type=str, default="ntu60", choices=["ntu60", "ut_mhad"])
     p.add_argument("--num_classes", type=int, default=60)
+
+    # Paper-style staged training
+    p.add_argument("--init_skeleton_ckpt", type=str, default="")
+    p.add_argument("--init_rgb_ckpt", type=str, default="")
 
     p.add_argument("--stage", type=str, default="all", choices=["skeleton", "rgb", "fusion", "all"])
     p.add_argument("--epochs", type=int, default=60)
@@ -42,6 +51,46 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
 
     return p.parse_args()
+
+
+def _load_ckpt_state(path: str, device: str) -> dict:
+    ckpt = torch.load(path, map_location=device)
+    return ckpt.get("model", ckpt)
+
+
+def load_skeleton_into_mmff(mmff: nn.Module, skeleton_ckpt: str, device: str) -> None:
+    """Load SkeletonClassifier checkpoint into mmff.skeleton_backbone.
+
+    Expects keys like core.backbone.* (from stage=skeleton training).
+    """
+
+    state = _load_ckpt_state(skeleton_ckpt, device)
+    remap = {}
+    for k, v in state.items():
+        if k.startswith("core.backbone."):
+            remap[k.replace("core.backbone.", "skeleton_backbone.")] = v
+        elif k.startswith("backbone."):
+            remap[k.replace("backbone.", "skeleton_backbone.")] = v
+    missing, unexpected = mmff.load_state_dict(remap, strict=False)
+    # We intentionally ignore missing/unexpected since head layers differ
+    _ = (missing, unexpected)
+
+
+def load_rgb_into_mmff(mmff: nn.Module, rgb_ckpt: str, device: str) -> None:
+    """Load RGBClassifier checkpoint into mmff.rgb_backbone.
+
+    Expects keys like core.backbone.* (from stage=rgb training).
+    """
+
+    state = _load_ckpt_state(rgb_ckpt, device)
+    remap = {}
+    for k, v in state.items():
+        if k.startswith("core.backbone."):
+            remap[k.replace("core.backbone.", "rgb_backbone.")] = v
+        elif k.startswith("backbone."):
+            remap[k.replace("backbone.", "rgb_backbone.")] = v
+    missing, unexpected = mmff.load_state_dict(remap, strict=False)
+    _ = (missing, unexpected)
 
 
 def set_seed(seed: int) -> None:
@@ -123,6 +172,9 @@ def main() -> None:
         DatasetConfig(
             data_dir=args.data_dir,
             split="train",
+            data_path=(args.train_data or None),
+            label_path=(args.train_label or None),
+            images_dir=(args.images_dir or None),
             image_size=args.image_size,
             augment=True,
         )
@@ -131,6 +183,9 @@ def main() -> None:
         DatasetConfig(
             data_dir=args.data_dir,
             split="val",
+            data_path=(args.val_data or None),
+            label_path=(args.val_label or None),
+            images_dir=(args.images_dir or None),
             image_size=args.image_size,
             augment=False,
         )
@@ -164,6 +219,12 @@ def main() -> None:
         forward = lambda sk, rgb: model(rgb)  # noqa: E731
     else:
         model = build_mmff(args)
+
+        # Optionally initialize backbones from pretrained single-stream checkpoints
+        if args.init_skeleton_ckpt:
+            load_skeleton_into_mmff(model, args.init_skeleton_ckpt, device)
+        if args.init_rgb_ckpt:
+            load_rgb_into_mmff(model, args.init_rgb_ckpt, device)
         forward = lambda sk, rgb: model(sk, rgb)  # noqa: E731
 
     model = model.to(device)
@@ -193,7 +254,7 @@ def main() -> None:
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         best_acc = float(ckpt.get("best_acc", 0.0))
 
-    # For fusion/all stages, optionally freeze backbones (paper stage-2)
+    # For fusion stage, freeze backbones (paper stage-2)
     if args.stage == "fusion":
         for n, p in wrapped.named_parameters():
             if n.startswith("core.skeleton_backbone") or n.startswith("core.rgb_backbone"):
@@ -208,10 +269,11 @@ def main() -> None:
         is_best = val_acc > best_acc
         best_acc = max(best_acc, val_acc)
 
-        ckpt_path = os.path.join(args.checkpoint_dir, "last.pt")
+        # stage-specific ckpt names to support multi-stage workflow
+        ckpt_path = os.path.join(args.checkpoint_dir, f"{args.stage}_last.pt")
         save_ckpt(ckpt_path, wrapped, optimizer, epoch, best_acc)
         if is_best:
-            save_ckpt(os.path.join(args.checkpoint_dir, "best.pt"), wrapped, optimizer, epoch, best_acc)
+            save_ckpt(os.path.join(args.checkpoint_dir, f"{args.stage}_best.pt"), wrapped, optimizer, epoch, best_acc)
 
         dt = time.time() - t0
         print(

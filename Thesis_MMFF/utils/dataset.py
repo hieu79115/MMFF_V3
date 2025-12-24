@@ -62,10 +62,20 @@ def _ensure_skeleton_layout(x: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported skeleton npy shape {x.shape}. Expected 4D or 5D array.")
 
 
+def _find_file_recursive(root: str, filename: str) -> Optional[str]:
+    for dirpath, _, files in os.walk(root):
+        if filename in files:
+            return os.path.join(dirpath, filename)
+    return None
+
+
 @dataclass
 class DatasetConfig:
     data_dir: str
     split: str  # train|val
+    data_path: Optional[str] = None
+    label_path: Optional[str] = None
+    images_dir: Optional[str] = None
     images_dirname: str = "images"
     image_ext: str = ".jpg"
     image_size: int = 299
@@ -96,9 +106,36 @@ class MMFFDataset(Dataset):
         if cfg.split not in {"train", "val", "test"}:
             raise ValueError("split must be train|val|test")
 
-        data_path = os.path.join(cfg.data_dir, f"{cfg.split}_data.npy")
-        label_path = os.path.join(cfg.data_dir, f"{cfg.split}_label.pkl")
-        self.images_dir = os.path.join(cfg.data_dir, cfg.images_dirname)
+        default_data = os.path.join(cfg.data_dir, f"{cfg.split}_data.npy")
+        default_label = os.path.join(cfg.data_dir, f"{cfg.split}_label.pkl")
+
+        data_path = cfg.data_path or default_data
+        label_path = cfg.label_path or default_label
+
+        # images directory can be explicitly provided, otherwise default to {data_dir}/images
+        self.images_dir = cfg.images_dir or os.path.join(cfg.data_dir, cfg.images_dirname)
+
+        # Auto-discovery: if expected default file doesn't exist, try searching inside data_dir
+        if not os.path.exists(data_path) and cfg.data_path is None:
+            found = _find_file_recursive(cfg.data_dir, os.path.basename(default_data))
+            if found:
+                data_path = found
+
+        if not os.path.exists(label_path) and cfg.label_path is None:
+            found = _find_file_recursive(cfg.data_dir, os.path.basename(default_label))
+            if found:
+                label_path = found
+
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(
+                f"Missing skeleton npy: '{data_path}'. "
+                f"Pass correct --data_dir, or set an explicit path (e.g. --train_data /kaggle/input/.../train_data.npy)."
+            )
+        if not os.path.exists(label_path):
+            raise FileNotFoundError(
+                f"Missing label pkl: '{label_path}'. "
+                f"Pass correct --data_dir, or set an explicit path (e.g. --train_label /kaggle/input/.../train_label.pkl)."
+            )
 
         self._data = _ensure_skeleton_layout(np.load(data_path, mmap_mode=None))
         self.names, self.labels = _load_label_pkl(label_path)

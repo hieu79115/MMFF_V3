@@ -17,6 +17,9 @@ from utils.dataset import DatasetConfig, MMFFDataset
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", type=str, default="data")
+    p.add_argument("--val_data", type=str, default="")
+    p.add_argument("--val_label", type=str, default="")
+    p.add_argument("--images_dir", type=str, default="")
     p.add_argument("--dataset", type=str, default="ntu60", choices=["ntu60", "ut_mhad"])
     p.add_argument("--num_classes", type=int, default=60)
     p.add_argument("--checkpoint", type=str, required=True)
@@ -36,6 +39,9 @@ def main() -> None:
         DatasetConfig(
             data_dir=args.data_dir,
             split="val",
+            data_path=(args.val_data or None),
+            label_path=(args.val_label or None),
+            images_dir=(args.images_dir or None),
             image_size=args.image_size,
             augment=False,
         )
