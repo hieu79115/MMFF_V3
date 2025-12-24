@@ -1,0 +1,5 @@
+data/
+__pycache__/
+*.pth
+test_pipeline.py
+*.pdf
