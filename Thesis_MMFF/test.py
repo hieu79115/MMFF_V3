@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from models.mmff_net import MMFFConfig, MMFF_Net_Advanced
+from models.rgb import RGBClassifier, RGBStream_Base
+from models.skeleton import SkeletonClassifier, SkeletonStream_STGCN
 from utils.dataset import DatasetConfig, MMFFDataset
 
 
@@ -22,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--images_dir", type=str, default="")
     p.add_argument("--dataset", type=str, default="ntu60", choices=["ntu60", "ut_mhad"])
     p.add_argument("--num_classes", type=int, default=60)
+    p.add_argument("--stage", type=str, default="all", choices=["all", "fusion", "skeleton", "rgb"])
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers", type=int, default=2)
@@ -29,6 +32,46 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--save_cm", type=str, default="")
     return p.parse_args()
+
+
+def _resolve_checkpoint(path: str, stage: str) -> str:
+    """Resolve a checkpoint path.
+
+    Supports:
+    - direct file path
+    - directory path (pick a '*best.pt' file)
+    - legacy names best.pt/last.pt mapped to '{stage}_best.pt'/'{stage}_last.pt'
+    """
+
+    if os.path.isdir(path):
+        # Prefer stage-specific best
+        cand = os.path.join(path, f"{stage}_best.pt")
+        if os.path.exists(cand):
+            return cand
+        # Any best
+        bests = [os.path.join(path, f) for f in os.listdir(path) if f.endswith("best.pt")]
+        if bests:
+            bests.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            return bests[0]
+        raise FileNotFoundError(f"No '*best.pt' found in checkpoint dir: {path}")
+
+    if os.path.exists(path):
+        return path
+
+    # legacy mapping
+    base = os.path.basename(path)
+    parent = os.path.dirname(path) or "."
+    if base in {"best.pt", "last.pt"}:
+        mapped = os.path.join(parent, f"{stage}_{base}")
+        if os.path.exists(mapped):
+            return mapped
+
+        # also try 'all_*' as common default
+        mapped2 = os.path.join(parent, f"all_{base}")
+        if os.path.exists(mapped2):
+            return mapped2
+
+    raise FileNotFoundError(f"Checkpoint not found: {path}")
 
 
 @torch.no_grad()
@@ -48,11 +91,23 @@ def main() -> None:
     )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    cfg = MMFFConfig(dataset=args.dataset, num_classes=args.num_classes)
-    model = MMFF_Net_Advanced(cfg)
+    # Build model for the requested stage
+    if args.stage == "skeleton":
+        sk_backbone = SkeletonStream_STGCN(dataset=args.dataset)
+        model = SkeletonClassifier(sk_backbone, num_classes=args.num_classes)
+        forward = lambda sk, rgb: model(sk)  # noqa: E731
+    elif args.stage == "rgb":
+        rgb_backbone = RGBStream_Base(pretrained=False)
+        model = RGBClassifier(rgb_backbone, num_classes=args.num_classes)
+        forward = lambda sk, rgb: model(rgb)  # noqa: E731
+    else:
+        cfg = MMFFConfig(dataset=args.dataset, num_classes=args.num_classes, rgb_pretrained=False)
+        model = MMFF_Net_Advanced(cfg)
+        forward = lambda sk, rgb: model(sk, rgb)  # noqa: E731
 
     device = args.device
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt_path = _resolve_checkpoint(args.checkpoint, stage=args.stage)
+    ckpt = torch.load(ckpt_path, map_location=device)
     state = ckpt.get("model", ckpt)
     model.load_state_dict(state, strict=False)
 
@@ -69,7 +124,7 @@ def main() -> None:
         rgb = rgb.to(device)
         label = label.to(device)
 
-        logits = model(skeleton, rgb)
+        logits = forward(skeleton, rgb)
         pred = logits.argmax(dim=1)
 
         all_true.append(label.cpu().numpy())
