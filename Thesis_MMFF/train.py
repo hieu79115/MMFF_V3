@@ -166,7 +166,19 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
 
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Make paths independent of current working directory (important on Kaggle)
+    if args.checkpoint_dir and not os.path.isabs(args.checkpoint_dir):
+        args.checkpoint_dir = os.path.join(script_dir, args.checkpoint_dir)
+    if args.resume and not os.path.isabs(args.resume):
+        args.resume = os.path.join(script_dir, args.resume)
+    if args.init_skeleton_ckpt and not os.path.isabs(args.init_skeleton_ckpt):
+        args.init_skeleton_ckpt = os.path.join(script_dir, args.init_skeleton_ckpt)
+    if args.init_rgb_ckpt and not os.path.isabs(args.init_rgb_ckpt):
+        args.init_rgb_ckpt = os.path.join(script_dir, args.init_rgb_ckpt)
+
     os.makedirs(args.checkpoint_dir, exist_ok=True)
+    print(f"Checkpoint dir: {args.checkpoint_dir}")
 
     train_ds = MMFFDataset(
         DatasetConfig(

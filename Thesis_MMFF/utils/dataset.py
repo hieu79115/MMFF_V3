@@ -62,6 +62,52 @@ def _ensure_skeleton_layout(x: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported skeleton npy shape {x.shape}. Expected 4D or 5D array.")
 
 
+def _augment_skeleton_rot_scale(skeleton: np.ndarray) -> np.ndarray:
+    """Rotation (x,y) in [0,30] degrees + scale (x,y in [1,1.2]) as in the paper.
+
+    skeleton: (C,T,V,M)
+    Returns same shape.
+    """
+
+    if skeleton.ndim != 4:
+        return skeleton
+    C, T, V, M = skeleton.shape
+    if C < 3:
+        return skeleton
+
+    # Random rotations
+    alpha = np.deg2rad(np.random.uniform(0.0, 30.0))
+    beta = np.deg2rad(np.random.uniform(0.0, 30.0))
+    gamma = 0.0
+
+    Rx = np.array(
+        [[1, 0, 0], [0, np.cos(alpha), -np.sin(alpha)], [0, np.sin(alpha), np.cos(alpha)]],
+        dtype=np.float32,
+    )
+    Ry = np.array(
+        [[np.cos(beta), 0, np.sin(beta)], [0, 1, 0], [-np.sin(beta), 0, np.cos(beta)]],
+        dtype=np.float32,
+    )
+    Rz = np.array(
+        [[np.cos(gamma), -np.sin(gamma), 0], [np.sin(gamma), np.cos(gamma), 0], [0, 0, 1]],
+        dtype=np.float32,
+    )
+    R = (Rz @ Ry @ Rx).astype(np.float32)
+
+    sx = np.random.uniform(1.0, 1.2)
+    sy = np.random.uniform(1.0, 1.2)
+    sz = 1.0
+    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, sz]], dtype=np.float32)
+
+    X = skeleton[0:3].copy()  # (3,T,V,M)
+    X = X.reshape(3, -1)  # (3, T*V*M)
+    X = (S @ (R @ X)).astype(np.float32)
+    X = X.reshape(3, T, V, M)
+    skeleton = skeleton.copy()
+    skeleton[0:3] = X
+    return skeleton
+
+
 def _find_file_recursive(root: str, filename: str) -> Optional[str]:
     for dirpath, _, files in os.walk(root):
         if filename in files:
@@ -173,6 +219,8 @@ class MMFFDataset(Dataset):
 
     def __getitem__(self, idx: int):
         sk = self._data[idx]  # (C,T,V,M)
+        if self.cfg.augment:
+            sk = _augment_skeleton_rot_scale(sk)
         name = self.names[idx]
         label = int(self.labels[idx])
 

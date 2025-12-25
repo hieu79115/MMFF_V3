@@ -43,6 +43,13 @@ def _resolve_checkpoint(path: str, stage: str) -> str:
     - legacy names best.pt/last.pt mapped to '{stage}_best.pt'/'{stage}_last.pt'
     """
 
+    # If relative, also try resolving from this script directory (Kaggle-safe)
+    if not os.path.isabs(path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        alt = os.path.join(script_dir, path)
+        if os.path.exists(alt) or os.path.isdir(alt):
+            path = alt
+
     if os.path.isdir(path):
         # Prefer stage-specific best
         cand = os.path.join(path, f"{stage}_best.pt")
